@@ -115,7 +115,7 @@ struct FVGInfo
 //| Identify Fair Value Gaps (FVGs)                                  |
 //+------------------------------------------------------------------+
 // Returns the number of FVGs found and populates the fvgs_array
-int IdentifyFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback_bars, double min_fvg_size_points, out FVGInfo &fvgs_array[])
+int IdentifyFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback_bars, double min_fvg_size_points, FVGInfo &fvgs_array[])
   {
    ArrayFree(fvgs_array); // Clear the array before populating
 
@@ -226,7 +226,7 @@ int IdentifyOrderBlocks(string symbol, ENUM_TIMEFRAMES timeframe,
                           double min_ob_body_percent, // Min body size relative to candle range (0-100)
                           int bos_validation_lookforward, // How many bars after OB to check for BOS
                           double bos_min_move_points, // Min points for the move after OB to be considered significant for BOS
-                          out OrderBlockInfo &obs_array[])
+                          OrderBlockInfo &obs_array[])
   {
    ArrayFree(obs_array);
    MqlRates rates[];
