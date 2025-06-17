@@ -92,80 +92,287 @@ struct EntrySignal
 //+------------------------------------------------------------------+
 //| Check Entry Conditions                                           |
 //+------------------------------------------------------------------+
-EntrySignal CheckEntryConditions(string symbol, ENUM_TIMEFRAMES timeframe,
-                                 int ema_fast_period, int ema_slow_period,
-                                 int rsi_period, double rsi_overbought, double rsi_oversold,
-                                 int bos_swing_lookback, int bos_confirmation_lookback,
-                                 double tp_rr_ratio,
-                                 double fixed_sl_points // Renamed from pips to points for clarity
-                                )
+EntrySignal CheckEntryConditions(
+    string symbol, ENUM_TIMEFRAMES timeframe,
+    // EMA
+    int ema_fast_period, int ema_slow_period,
+    // RSI
+    int rsi_period, double rsi_overbought, double rsi_oversold,
+    // BOS
+    int bos_swing_lookback, int bos_confirmation_lookback,
+    // FVG
+    bool enable_fvg_detection, int fvg_lookback_period, double min_fvg_size_points,
+    // OB
+    bool enable_ob_detection, int ob_lookback_period, double min_ob_body_percent,
+    int ob_bos_validation_lookforward, double ob_bos_min_move_points,
+    // Engulfing
+    bool enable_engulfing_confirmation,
+    // Trade Params
+    double tp_rr_ratio, double initial_fixed_sl_pips, // Renamed for clarity
+    double sl_buffer_points
+)
   {
-   EntrySignal signal;
-   signal.valid_signal = false;
+    EntrySignal signal;
+    signal.valid_signal = false;
 
-   // 1. Get current market prices (Ask for Buy, Bid for Sell)
-   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
-   double point = SymbolInfoDouble(symbol, SYMBOL_POINT); // Smallest price change
+    // 0. Basic Price Data
+    MqlRates current_candle_data[2]; // rates[0] = last closed (shift 1), rates[1] = second to last (shift 2)
+    if(CopyRates(symbol, timeframe, 1, 2, current_candle_data) < 2) {
+        PrintFormat("Error copying rates for entry conditions on %s", symbol);
+        return signal;
+    }
+    ArraySetAsSeries(current_candle_data, true); // current_candle_data[0] is shift 1 (last closed)
 
-   if(ask == 0 || bid == 0 || point == 0) {
-       PrintFormat("Invalid market prices for %s. Ask:%.5f, Bid:%.5f, Point:%.5f", symbol, ask, bid, point);
-       return signal;
-   }
+    double current_close = current_candle_data[0].close;
+    double current_high = current_candle_data[0].high;
+    double current_low = current_candle_data[0].low;
+    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
 
-   // 2. Calculate Indicators
-   // Shift 1 for last closed bar, shift 0 for current forming bar. We need indicators on closed bars.
-   double ema_fast_current = GetEMA(symbol, timeframe, ema_fast_period, 1);
-   double ema_slow_current = GetEMA(symbol, timeframe, ema_slow_period, 1);
-   double rsi_current = GetRSI(symbol, timeframe, rsi_period, 1);
+    if(ask == 0 || bid == 0 || point == 0) {
+        PrintFormat("Invalid market prices for %s. Ask:%.5f, Bid:%.5f, Point:%.5f", symbol, ask, bid, point);
+        return signal;
+    }
 
-   if(ema_fast_current < 0 || ema_slow_current < 0 || rsi_current < 0) // Error in indicator calc
-     {
-      PrintFormat("Error calculating indicators for %s. EMA_Fast: %.5f, EMA_Slow: %.5f, RSI: %.2f",
-                  symbol, ema_fast_current, ema_slow_current, rsi_current);
-      return signal;
-     }
+    // 1. Check BOS
+    int bos_signal = CheckBOS(symbol, timeframe, bos_swing_lookback, bos_confirmation_lookback);
+    if(bos_signal == 0) {
+        // PrintFormat("No BOS detected for %s", symbol); // Can be verbose
+        return signal;
+    }
 
-   // 3. Check SMC Signals (BOS for now)
-   // CheckBOS uses confirmation_lookback starting from shift 1 (closed bars)
-   int bos_signal = CheckBOS(symbol, timeframe, bos_swing_lookback, bos_confirmation_lookback);
+    // 2. Calculate Indicators (RSI, EMA)
+    double ema_fast_current = GetEMA(symbol, timeframe, ema_fast_period, 1);
+    double ema_slow_current = GetEMA(symbol, timeframe, ema_slow_period, 1);
+    double rsi_current = GetRSI(symbol, timeframe, rsi_period, 1);
 
-   // 4. Combine Logic for BUY Signal
-   //    - Bullish BOS (bos_signal == 1)
-   //    - RSI < rsi_oversold  (Original: RSI > 70 for Buy - this was likely a typo in description, should be oversold for buy)
-   //    - EMA Fast > EMA Slow
-   if(bos_signal == 1 && rsi_current < rsi_oversold && ema_fast_current > ema_slow_current)
-     {
-          signal.valid_signal = true;
-          signal.type = ORDER_TYPE_BUY;
-          signal.entry_price = ask; // Enter at current Ask
-          signal.stop_loss_price = signal.entry_price - fixed_sl_points * point;
-          signal.take_profit_price = signal.entry_price + (fixed_sl_points * tp_rr_ratio) * point;
-          signal.comment = "BUY: BOS + RSI Oversold + EMA Bullish";
-          PrintFormat("%s %s: BUY Signal. Price:%.5f SL:%.5f TP:%.5f. BOS:%d, RSI:%.2f (OS:%.1f), EMAFast:%.5f, EMASlow:%.5f, SL points: %.1f",
-                       symbol, EnumToString(timeframe), signal.entry_price, signal.stop_loss_price, signal.take_profit_price,
-                       bos_signal, rsi_current, rsi_oversold, ema_fast_current, ema_slow_current, fixed_sl_points);
-          return signal;
-     }
+    if(ema_fast_current < 0 || ema_slow_current < 0 || rsi_current < 0) { // Error in indicator calc
+     PrintFormat("Error calculating indicators for %s. EMA_Fast: %.5f, EMA_Slow: %.5f, RSI: %.2f",
+                 symbol, ema_fast_current, ema_slow_current, rsi_current);
+     return signal;
+    }
 
-   // 5. Combine Logic for SELL Signal
-   //    - Bearish BOS (bos_signal == -1)
-   //    - RSI > rsi_overbought (Original: RSI < 30 for Sell - this was likely a typo, should be overbought for sell)
-   //    - EMA Fast < EMA Slow
-   if(bos_signal == -1 && rsi_current > rsi_overbought && ema_fast_current < ema_slow_current)
-     {
-          signal.valid_signal = true;
-          signal.type = ORDER_TYPE_SELL;
-          signal.entry_price = bid; // Enter at current Bid
-          signal.stop_loss_price = signal.entry_price + fixed_sl_points * point;
-          signal.take_profit_price = signal.entry_price - (fixed_sl_points * tp_rr_ratio) * point;
-          signal.comment = "SELL: BOS + RSI Overbought + EMA Bearish";
-          PrintFormat("%s %s: SELL Signal. Price:%.5f SL:%.5f TP:%.5f. BOS:%d, RSI:%.2f (OB:%.1f), EMAFast:%.5f, EMASlow:%.5f, SL points: %.1f",
-                       symbol, EnumToString(timeframe), signal.entry_price, signal.stop_loss_price, signal.take_profit_price,
-                       bos_signal, rsi_current, rsi_overbought, ema_fast_current, ema_slow_current, fixed_sl_points);
-          return signal;
-     }
-   return signal;
+    // Determine trade direction based on BOS
+    bool is_buy_scenario = (bos_signal == 1);
+    bool is_sell_scenario = (bos_signal == -1);
+
+    // Filter based on EMA direction
+    if(is_buy_scenario && ema_fast_current <= ema_slow_current) {
+        // PrintFormat("EMA not aligned for BUY on %s. Fast: %.5f, Slow: %.5f", symbol, ema_fast_current, ema_slow_current);
+        return signal;
+    }
+    if(is_sell_scenario && ema_fast_current >= ema_slow_current) {
+        // PrintFormat("EMA not aligned for SELL on %s. Fast: %.5f, Slow: %.5f", symbol, ema_fast_current, ema_slow_current);
+        return signal;
+    }
+
+    // Filter based on RSI (Original logic: extremes)
+    if(is_buy_scenario && rsi_current >= rsi_oversold) { // Expect RSI < OS for buy
+        // PrintFormat("RSI not oversold for BUY on %s. RSI: %.2f, OS Level: %.2f", symbol, rsi_current, rsi_oversold);
+        return signal;
+    }
+    if(is_sell_scenario && rsi_current <= rsi_overbought) { // Expect RSI > OB for sell
+        // PrintFormat("RSI not overbought for SELL on %s. RSI: %.2f, OB Level: %.2f", symbol, rsi_current, rsi_overbought);
+        return signal;
+    }
+
+    // --- FVG/OB Zone Identification & Retest ---
+    FVGInfo fvgs[];
+    OrderBlockInfo obs[];
+    int fvg_count = 0;
+    int ob_count = 0;
+
+    if(enable_fvg_detection) {
+        fvg_count = IdentifyFVG(symbol, timeframe, fvg_lookback_period, min_fvg_size_points, fvgs);
+        // ArrayReverse(fvgs); // Process newest FVGs first if desired
+    }
+    if(enable_ob_detection) {
+        ob_count = IdentifyOrderBlocks(symbol, timeframe, ob_lookback_period, min_ob_body_percent,
+                                       ob_bos_validation_lookforward, ob_bos_min_move_points, obs);
+        // ArrayReverse(obs); // Process newest OBs first
+    }
+
+    // Iterate identified zones (FVGs then OBs) to find a retest and engulfing
+    for(int zone_type_iter = 0; zone_type_iter < 2; zone_type_iter++)
+    {
+        if(zone_type_iter == 0 && (!enable_fvg_detection || fvg_count == 0)) continue;
+        if(zone_type_iter == 1 && (!enable_ob_detection || ob_count == 0)) continue;
+
+        int current_zone_count = (zone_type_iter == 0) ? fvg_count : ob_count;
+
+        for(int i = 0; i < current_zone_count; i++)
+        {
+            bool zone_is_bullish_type = false; // Type of zone (bullish FVG or bullish OB)
+            double zone_top_level = 0, zone_bottom_level = 0;
+            // datetime zone_bar_time = 0; // For checking freshness if needed
+
+            if(zone_type_iter == 0) // FVG
+            {
+                if (!fvgs[i].detected) continue;
+                zone_is_bullish_type = fvgs[i].is_bullish_fvg;
+                zone_top_level = fvgs[i].top_level;
+                zone_bottom_level = fvgs[i].bottom_level;
+                // zone_bar_time = fvgs[i].bar_time;
+            }
+            else // Order Block
+            {
+                if (!obs[i].detected) continue;
+                zone_is_bullish_type = obs[i].is_bullish_ob;
+                zone_top_level = obs[i].top_level;       // OB high
+                zone_bottom_level = obs[i].bottom_level; // OB low
+                // zone_bar_time = obs[i].bar_time;
+            }
+
+            bool retest_criteria_met = false;
+            // For a buy scenario (bullish BOS), we look for retest of a bullish FVG or bullish OB.
+            if(is_buy_scenario && zone_is_bullish_type)
+            {
+                // Last closed candle's low (current_low) dipped into the zone (defined by its bottom and top).
+                // Or previous candle dipped and current is an engulfing.
+                if(current_low <= zone_top_level && current_low >= zone_bottom_level) { // current candle low tested the zone
+                     retest_criteria_met = true;
+                }
+            }
+            // For a sell scenario (bearish BOS), we look for retest of a bearish FVG or bearish OB.
+            else if(is_sell_scenario && !zone_is_bullish_type)
+            {
+                // Last closed candle's high (current_high) tested the zone.
+                if(current_high >= zone_bottom_level && current_high <= zone_top_level) {
+                    retest_criteria_met = true;
+                }
+            }
+
+            if(retest_criteria_met)
+            {
+                bool engulfing_passed = false;
+                if(enable_engulfing_confirmation)
+                {
+                    // Check engulfing on the last closed bar (current_candle_data[0], which has index 0 here due to ArraySetAsSeries and CopyRates shift 1)
+                    // The IsEngulfingPattern expects bar_shift relative to current forming bar. So shift 1 is correct for current_candle_data[0].
+                    engulfing_passed = IsEngulfingPattern(symbol, timeframe, 1, is_buy_scenario);
+                }
+                else
+                {
+                    engulfing_passed = true; // Skip if disabled
+                }
+
+                if(engulfing_passed)
+                {
+                    signal.valid_signal = true;
+                    signal.type = is_buy_scenario ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+
+                    // --- Stop Loss Logic Refinement ---
+                    double proposed_sl_price = 0;
+                    // point is already available
+
+                    if(is_buy_scenario)
+                    {
+                        signal.entry_price = ask; // Ensure entry price is set before SL calc
+                        double engulfing_low = current_candle_data[0].low;
+
+                        if(zone_type_iter == 1 && obs[i].detected) // OB was the trigger zone
+                        {
+                            proposed_sl_price = obs[i].bottom_level;
+                            if(enable_engulfing_confirmation && engulfing_passed)
+                            {
+                                proposed_sl_price = MathMin(proposed_sl_price, engulfing_low);
+                            }
+                        }
+                        else if (zone_type_iter == 0 && fvgs[i].detected) // FVG was the trigger zone
+                        {
+                            if(enable_engulfing_confirmation && engulfing_passed) {
+                                proposed_sl_price = engulfing_low;
+                            } else { // FVG retest without engulfing (or engulfing disabled)
+                                proposed_sl_price = fvgs[i].bottom_level;
+                            }
+                        }
+
+                        if(proposed_sl_price == 0 && initial_fixed_sl_pips > 0) { // Fallback if no zone SL logic hit
+                             proposed_sl_price = signal.entry_price - initial_fixed_sl_pips * point;
+                        } else if (proposed_sl_price == 0) { // Absolute fallback if fixed SL is also 0 (should not happen with good inputs)
+                             proposed_sl_price = signal.entry_price - 10 * point; // Default 10 points
+                        }
+
+
+                        if (proposed_sl_price != 0) proposed_sl_price -= sl_buffer_points * point;
+
+                        double min_sl_value_from_fixed = signal.entry_price - initial_fixed_sl_pips * point;
+                        if(initial_fixed_sl_pips > 0 && (signal.entry_price - proposed_sl_price) < (initial_fixed_sl_pips * point * 0.95) && proposed_sl_price != 0) {
+                             proposed_sl_price = min_sl_value_from_fixed;
+                        }
+                        signal.stop_loss_price = proposed_sl_price;
+                    }
+                    else // Sell Scenario
+                    {
+                        signal.entry_price = bid; // Ensure entry price is set
+                        double engulfing_high = current_candle_data[0].high;
+
+                        if(zone_type_iter == 1 && obs[i].detected) // OB was the trigger zone
+                        {
+                            proposed_sl_price = obs[i].top_level;
+                            if(enable_engulfing_confirmation && engulfing_passed)
+                            {
+                                proposed_sl_price = MathMax(proposed_sl_price, engulfing_high);
+                            }
+                        }
+                        else if (zone_type_iter == 0 && fvgs[i].detected) // FVG was the trigger zone
+                        {
+                            if(enable_engulfing_confirmation && engulfing_passed) {
+                                proposed_sl_price = engulfing_high;
+                            } else {
+                                 proposed_sl_price = fvgs[i].top_level;
+                            }
+                        }
+
+                        if(proposed_sl_price == 0 && initial_fixed_sl_pips > 0) {
+                            proposed_sl_price = signal.entry_price + initial_fixed_sl_pips * point;
+                        } else if (proposed_sl_price == 0) {
+                             proposed_sl_price = signal.entry_price + 10 * point; // Default 10 points
+                        }
+
+                        if (proposed_sl_price != 0) proposed_sl_price += sl_buffer_points * point;
+
+                        double min_sl_value_from_fixed = signal.entry_price + initial_fixed_sl_pips * point;
+                        if(initial_fixed_sl_pips > 0 && (proposed_sl_price - signal.entry_price) < (initial_fixed_sl_pips * point * 0.95) && proposed_sl_price != 0) {
+                             proposed_sl_price = min_sl_value_from_fixed;
+                        }
+                        signal.stop_loss_price = proposed_sl_price;
+                    }
+
+                    if (is_buy_scenario && (signal.stop_loss_price == 0 || signal.stop_loss_price >= signal.entry_price)) {
+                        signal.stop_loss_price = signal.entry_price - (initial_fixed_sl_pips > 0 ? initial_fixed_sl_pips : 10.0) * point - (sl_buffer_points * point);
+                    } else if (!is_buy_scenario && (signal.stop_loss_price == 0 || signal.stop_loss_price <= signal.entry_price)) {
+                        signal.stop_loss_price = signal.entry_price + (initial_fixed_sl_pips > 0 ? initial_fixed_sl_pips : 10.0) * point + (sl_buffer_points * point);
+                    }
+
+                    double sl_pips_for_tp_calc = MathAbs(signal.entry_price - signal.stop_loss_price) / point;
+                    if(sl_pips_for_tp_calc <= 0) {
+                        sl_pips_for_tp_calc = initial_fixed_sl_pips > 0 ? initial_fixed_sl_pips : 10.0;
+                        if (is_buy_scenario) signal.stop_loss_price = signal.entry_price - sl_pips_for_tp_calc * point;
+                        else signal.stop_loss_price = signal.entry_price + sl_pips_for_tp_calc * point;
+                         PrintFormat("SL recalc fallback used for TP calc on %s. SL pips for TP: %.1f", symbol, sl_pips_for_tp_calc);
+                    }
+
+                    signal.take_profit_price = is_buy_scenario ?
+                        (signal.entry_price + sl_pips_for_tp_calc * tp_rr_ratio * point) :
+                        (signal.entry_price - sl_pips_for_tp_calc * tp_rr_ratio * point);
+
+                    signal.comment = StringFormat("%s: BOS+%s+%s Engulf.RSI:%.1f SLP:%.1f",
+                                       (is_buy_scenario ? "BUY" : "SELL"),
+                                       (zone_type_iter==0 ? "FVG" : "OB"),
+                                       (enable_engulfing_confirmation ? "" : "NoEng."), rsi_current);
+
+                    PrintFormat("%s %s: %s Signal. Zone Retest: %s. Engulf: %s. Price:%.5f SL:%.5f TP:%.5f. Comment: %s",
+                               symbol, EnumToString(timeframe), (is_buy_scenario ? "BUY" : "SELL"),
+                               (zone_type_iter==0 ? "FVG" : "OB"), (engulfing_passed ? "Yes" : "No/Disabled"),
+                               signal.entry_price, signal.stop_loss_price, signal.take_profit_price, signal.comment);
+                    return signal; // Signal found
+                }
+            }
+        }
+    } // End of zone type iteration (FVG/OB)
+    return signal; // No valid signal found
   }
 
 //+------------------------------------------------------------------+

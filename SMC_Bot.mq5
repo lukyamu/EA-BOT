@@ -41,9 +41,19 @@ input double RSI_Oversold = 30.0;   // RSI Oversold level
 //--- SMC Settings
 input int BOS_Swing_Lookback_Period = 20; // Period to identify previous swing high/low for BOS
 input int BOS_Confirmation_Lookback = 1;  // Number of recent bars to confirm BOS
+input bool   Enable_FVG_Detection = true;     // Enable/Disable FVG detection
+input int    FVG_Lookback_Period = 50;        // Lookback period for identifying FVGs
+input double Min_FVG_Size_Points = 1.0;       // Minimum FVG size in points (e.g. 1 point, adjust based on symbol)
+input bool   Enable_OB_Detection = true;        // Enable/Disable Order Block detection
+input int    OB_Lookback_Period = 50;           // Lookback for OB candidates
+input double OB_Min_Body_Percent = 20.0;        // Minimum body size of OB candle (0-100), 0 to disable
+input int    OB_BOS_Validation_Lookforward = 5; // Bars after OB to confirm BOS
+input double OB_BOS_Min_Move_Points = 10.0;     // Min points for move after OB to be considered significant (for BOS validation)
+input bool   Enable_Engulfing_Confirmation = true; // Enable/Disable Engulfing candle confirmation at FVG/OB
 
 //--- Trade Logic Settings
 input double Fixed_SL_Pips = 15.0; // Fixed Stop Loss in Pips/Points (e.g. 15 for XAUUSD means $0.15 if point size is 0.01 and 1 pip = 1 point, or $1.5 if 1 pip = 10 points). User must verify for their symbol & broker.
+input double SL_Buffer_Points = 2.0; // Buffer in points to add beyond OB/Engulfing for SL
 
 //--- Timeframe & Symbols (Note: Symbol list will be handled in OnTick logic later)
 input ENUM_TIMEFRAMES Timeframe = PERIOD_M5; // Trading timeframe
@@ -268,11 +278,18 @@ void OnTick()
       }
 
       if(!position_exists_for_symbol) {
-         EntrySignal signal = CheckEntryConditions(current_symbol, Timeframe,
-                                                   EMA_Fast_Period, EMA_Slow_Period,
-                                                   RSI_Period, RSI_Overbought, RSI_Oversold,
-                                                   BOS_Swing_Lookback_Period, BOS_Confirmation_Lookback,
-                                                   TP_Risk_Reward_Ratio, Fixed_SL_Pips); // Fixed_SL_Pips is in points
+         EntrySignal signal = CheckEntryConditions(
+                                       current_symbol, Timeframe,
+                                       EMA_Fast_Period, EMA_Slow_Period,
+                                       RSI_Period, RSI_Overbought, RSI_Oversold,
+                                       BOS_Swing_Lookback_Period, BOS_Confirmation_Lookback,
+                                       Enable_FVG_Detection, FVG_Lookback_Period, Min_FVG_Size_Points,
+                                       Enable_OB_Detection, OB_Lookback_Period, OB_Min_Body_Percent,
+                                       OB_BOS_Validation_Lookforward, OB_BOS_Min_Move_Points,
+                                       Enable_Engulfing_Confirmation,
+                                       TP_Risk_Reward_Ratio, Fixed_SL_Pips,
+                                       SL_Buffer_Points
+                                       );
 
          if(signal.valid_signal) {
             double point_size = SymbolInfoDouble(current_symbol, SYMBOL_POINT);
